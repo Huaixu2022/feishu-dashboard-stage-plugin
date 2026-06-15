@@ -1,4 +1,8 @@
 {
+  "name": "feishu-dashboard-stage-plugin",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
   "scripts": {
     "dev": "vite --host 0.0.0.0",
     "build": "vite build",
@@ -7,13 +11,10 @@
   "dependencies": {
     "@vitejs/plugin-react": "latest",
     "vite": "latest",
+    "typescript": "latest",
     "react": "latest",
     "react-dom": "latest",
-    "@lark-base-open/js-sdk": "latest",
-    "@douyinfe/semi-ui": "latest",
-    "@semi-bot/semi-theme-feishu-dashboard": "latest",
-    "vite-plugin-semi-theming": "latest",
-    "@douyinfe/semi-foundation": "latest"
+    "@lark-base-open/js-sdk": "latest"
   },
   "devDependencies": {}
 }

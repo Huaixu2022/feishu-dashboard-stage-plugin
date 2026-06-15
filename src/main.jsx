@@ -1,217 +1,231 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { bitable } from '@lark-base-open/js-sdk';
-import '@semi-bot/semi-theme-feishu-dashboard/semi.min.css';
-import './style.css';
+import './styles.css';
 
-const CONFIG_KEY = 'stage_dashboard_config_v1';
-
-const defaultConfig = {
-  tableId: '',
-  viewId: '',
-  todayField: '',
-  totalWorkdayField: '',
-  currentWorkdayField: '',
-  progressField: '',
-  stageField: '',
-  targetProgressField: '',
-  actualProgressField: '',
-  title: '阶段进度'
+const FIELD_NAMES = {
+  isToday: '是否当日',
+  totalWorkdays: '本月总工作日数',
+  currentWorkday: '当月第几个工作日',
+  stageText: '当前日期所处阶段',
+  progress: '当前日期所处工作日进度',
+  stageCode: '当前阶段编码',
+  stage1End: '第一阶段截止',
+  stage2End: '第二阶段截止',
 };
 
-function toNumber(v) {
-  if (v === null || v === undefined || v === '') return null;
-  if (typeof v === 'number') return v;
-  if (typeof v === 'object') {
-    if ('text' in v) return toNumber(v.text);
-    if ('value' in v) return toNumber(v.value);
+const DEMO = {
+  stageText: '第二阶段',
+  stageCode: 2,
+  currentWorkday: 11,
+  totalWorkdays: 21,
+  progress: 52.38,
+  stage1End: 7,
+  stage2End: 14,
+  source: '本地预览数据'
+};
+
+function normalizeValue(value) {
+  if (value == null) return '';
+  if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') return value;
+  if (Array.isArray(value)) {
+    if (value.length === 0) return '';
+    return normalizeValue(value[0]);
   }
-  const s = String(v).replace('%', '').trim();
-  const n = Number(s);
-  return Number.isFinite(n) ? n : null;
+  if (typeof value === 'object') {
+    if ('text' in value) return value.text;
+    if ('name' in value) return value.name;
+    if ('value' in value) return value.value;
+    if ('title' in value) return value.title;
+    if ('id' in value) return value.id;
+  }
+  return String(value);
 }
 
-function toText(v) {
-  if (v === null || v === undefined) return '';
-  if (typeof v === 'string' || typeof v === 'number') return String(v);
-  if (Array.isArray(v)) return v.map(toText).join('');
-  if (typeof v === 'object') return v.text || v.name || v.value || JSON.stringify(v);
-  return String(v);
+function toNumber(value, fallback = 0) {
+  const raw = normalizeValue(value);
+  if (typeof raw === 'number') return raw;
+  const cleaned = String(raw).replace('%', '').trim();
+  const n = Number(cleaned);
+  return Number.isFinite(n) ? n : fallback;
 }
 
-function normalizePercent(v) {
-  const n = toNumber(v);
-  if (n === null) return null;
+function toPercent(value) {
+  const n = toNumber(value, 0);
   return n <= 1 ? n * 100 : n;
 }
 
-function calcStageByProgress(progress) {
-  if (progress === null) return 0;
-  if (progress <= 33.33) return 1;
-  if (progress <= 66.67) return 2;
-  return 3;
+function isYes(value) {
+  const v = String(normalizeValue(value)).trim();
+  return v === '是' || v === 'true' || v === 'TRUE' || v === '1';
 }
 
-function stageName(stage) {
-  return stage === 1 ? '第一阶段' : stage === 2 ? '第二阶段' : stage === 3 ? '第三阶段' : '未识别';
+async function getFieldByName(table, name) {
+  try {
+    return await table.getField(name);
+  } catch (_) {
+    return null;
+  }
 }
 
-function rangeText(total) {
-  const end1 = Math.ceil(total / 3);
-  const end2 = Math.ceil(total * 2 / 3);
+async function readLiveData() {
+  if (!bitable?.base?.getActiveTable) {
+    throw new Error('当前不是飞书多维表格插件环境');
+  }
+
+  const table = await bitable.base.getActiveTable();
+  const fieldMap = {};
+  await Promise.all(Object.entries(FIELD_NAMES).map(async ([key, name]) => {
+    fieldMap[key] = await getFieldByName(table, name);
+  }));
+
+  const required = ['isToday', 'totalWorkdays', 'currentWorkday', 'stageText', 'progress', 'stage1End', 'stage2End'];
+  const missing = required.filter(k => !fieldMap[k]);
+  if (missing.length) {
+    throw new Error(`缺少字段：${missing.map(k => FIELD_NAMES[k]).join('、')}`);
+  }
+
+  const recordIds = await table.getRecordIdList();
+  let todayRecordId = null;
+
+  for (const recordId of recordIds) {
+    const val = await fieldMap.isToday.getValue(recordId);
+    if (isYes(val)) {
+      todayRecordId = recordId;
+      break;
+    }
+  }
+
+  if (!todayRecordId) {
+    throw new Error('没有找到「是否当日 = 是」的记录');
+  }
+
+  const data = {};
+  for (const [key, field] of Object.entries(fieldMap)) {
+    if (!field) continue;
+    data[key] = await field.getValue(todayRecordId);
+  }
+
+  const stageText = String(normalizeValue(data.stageText) || '未知阶段');
+  const totalWorkdays = toNumber(data.totalWorkdays);
+  const currentWorkday = toNumber(data.currentWorkday);
+  const stage1End = toNumber(data.stage1End);
+  const stage2End = toNumber(data.stage2End);
+  const progress = toPercent(data.progress);
+  let stageCode = toNumber(data.stageCode);
+  if (!stageCode) {
+    if (stageText.includes('第一')) stageCode = 1;
+    else if (stageText.includes('第二')) stageCode = 2;
+    else if (stageText.includes('第三')) stageCode = 3;
+  }
+
   return {
-    end1,
-    end2,
-    ranges: [
-      `1-${end1}`,
-      `${end1 + 1}-${end2}`,
-      `${end2 + 1}-${total}`
-    ]
+    stageText,
+    stageCode,
+    currentWorkday,
+    totalWorkdays,
+    progress,
+    stage1End,
+    stage2End,
+    source: '飞书实时数据'
   };
 }
 
-async function safeGetConfig() {
-  try {
-    const cfg = await bitable.dashboard.getConfig();
-    return { ...defaultConfig, ...(cfg || {}) };
-  } catch (e) {
-    return defaultConfig;
-  }
-}
-
-async function saveConfig(cfg) {
-  try {
-    await bitable.dashboard.setConfig(cfg);
-  } catch (e) {
-    console.warn('setConfig failed', e);
-  }
-}
-
-async function loadTables() {
-  const tables = await bitable.base.getTableMetaList();
-  return tables || [];
-}
-
-async function loadViews(tableId) {
-  if (!tableId) return [];
-  const table = await bitable.base.getTableById(tableId);
-  return await table.getViewMetaList();
-}
-
-async function loadFields(tableId, viewId) {
-  if (!tableId) return [];
-  const table = await bitable.base.getTableById(tableId);
-  if (viewId) {
-    const view = await table.getViewById(viewId);
-    return await view.getFieldMetaList();
-  }
-  return await table.getFieldMetaList();
-}
-
-async function readTodayRow(cfg) {
-  const table = await bitable.base.getTableById(cfg.tableId);
-  const view = cfg.viewId ? await table.getViewById(cfg.viewId) : null;
-  const ids = view ? await view.getVisibleRecordIdList() : await table.getRecordIdList();
-
-  for (const recordId of ids) {
-    const isToday = toText(await table.getCellValue(cfg.todayField, recordId));
-    if (isToday === '是' || isToday.toLowerCase() === 'true' || isToday === '1') {
-      const total = toNumber(await table.getCellValue(cfg.totalWorkdayField, recordId)) || 0;
-      const current = toNumber(await table.getCellValue(cfg.currentWorkdayField, recordId)) || 0;
-      const progress = normalizePercent(await table.getCellValue(cfg.progressField, recordId));
-      const stageFromField = cfg.stageField ? toText(await table.getCellValue(cfg.stageField, recordId)) : '';
-      let stage = stageFromField.includes('一') ? 1 : stageFromField.includes('二') ? 2 : stageFromField.includes('三') ? 3 : calcStageByProgress(progress);
-      const target = cfg.targetProgressField ? normalizePercent(await table.getCellValue(cfg.targetProgressField, recordId)) : null;
-      const actual = cfg.actualProgressField ? normalizePercent(await table.getCellValue(cfg.actualProgressField, recordId)) : null;
-      return { total, current, progress, stage, target, actual };
-    }
-  }
-  return null;
-}
-
-function ConfigPanel({ cfg, setCfg, tables, views, fields, onConfirm }) {
-  const opts = fields.map(f => <option key={f.id} value={f.id}>{f.name}</option>);
-  return <div className="configWrap">
-    <div className="preview"><Card data={null} cfg={cfg} isPreview /></div>
-    <div className="settings">
-      <h3>配置阶段卡片</h3>
-      <label>标题<input value={cfg.title} onChange={e=>setCfg({...cfg,title:e.target.value})}/></label>
-      <label>数据表<select value={cfg.tableId} onChange={e=>setCfg({...cfg, tableId:e.target.value, viewId:'', todayField:''})}><option value="">请选择</option>{tables.map(t=><option key={t.id} value={t.id}>{t.name}</option>)}</select></label>
-      <label>视图<select value={cfg.viewId} onChange={e=>setCfg({...cfg, viewId:e.target.value})}><option value="">全部记录</option>{views.map(v=><option key={v.id} value={v.id}>{v.name}</option>)}</select></label>
-      <label>是否当日字段<select value={cfg.todayField} onChange={e=>setCfg({...cfg,todayField:e.target.value})}><option value="">请选择</option>{opts}</select></label>
-      <label>本月总工作日数字段<select value={cfg.totalWorkdayField} onChange={e=>setCfg({...cfg,totalWorkdayField:e.target.value})}><option value="">请选择</option>{opts}</select></label>
-      <label>当月第几个工作日字段<select value={cfg.currentWorkdayField} onChange={e=>setCfg({...cfg,currentWorkdayField:e.target.value})}><option value="">请选择</option>{opts}</select></label>
-      <label>工作日进度字段<select value={cfg.progressField} onChange={e=>setCfg({...cfg,progressField:e.target.value})}><option value="">请选择</option>{opts}</select></label>
-      <label>阶段文本字段（可选）<select value={cfg.stageField} onChange={e=>setCfg({...cfg,stageField:e.target.value})}><option value="">按进度自动判断</option>{opts}</select></label>
-      <label>阶段目标字段（可选）<select value={cfg.targetProgressField} onChange={e=>setCfg({...cfg,targetProgressField:e.target.value})}><option value="">不显示</option>{opts}</select></label>
-      <label>实际完成进度字段（可选）<select value={cfg.actualProgressField} onChange={e=>setCfg({...cfg,actualProgressField:e.target.value})}><option value="">不显示</option>{opts}</select></label>
-      <button onClick={onConfirm}>确定</button>
-    </div>
-  </div>
-}
-
-function Card({ data, cfg, isPreview=false }) {
-  const demo = data || { total: 21, current: 11, progress: 52.38, stage: 2, target: 66.67, actual: null };
-  const { ranges } = rangeText(demo.total || 21);
-  const target = demo.target;
-  const actual = demo.actual;
-  const showWarn = target !== null && actual !== null && actual < target;
-  return <div className="card">
-    <div className="top">
-      <div>
-        <div className="label">{cfg.title || '阶段进度'}</div>
-        <div className="stage">{stageName(demo.stage)}</div>
-      </div>
-      <div className="badge">{demo.current}/{demo.total}</div>
-    </div>
-    <div className="progressLine"><div style={{width:`${Math.min(demo.progress || 0,100)}%`}} /></div>
-    <div className="progressText">工作日进度 {Number(demo.progress || 0).toFixed(2)}%</div>
-    <div className="ranges">
-      {[1,2,3].map((n,i)=><div key={n} className={demo.stage===n?'active':''}><span>阶段{n}</span><b>{ranges[i]}</b></div>)}
-    </div>
-    {target !== null && <div className="mini"><span>阶段目标</span><b>{target.toFixed(2)}%</b></div>}
-    {actual !== null && <div className="mini"><span>当前完成</span><b>{actual.toFixed(2)}%</b></div>}
-    {target !== null && actual !== null && <div className={showWarn?'notice warn':'notice ok'}>{showWarn ? '⚠ 当前阶段未达标' : '✅ 当前阶段已达标'}</div>}
-    {isPreview && <div className="hint">预览数据，保存后读取今日记录</div>}
-  </div>
-}
-
 function App() {
-  const [state, setState] = useState('View');
-  const [cfg, setCfg] = useState(defaultConfig);
-  const [tables, setTables] = useState([]);
-  const [views, setViews] = useState([]);
-  const [fields, setFields] = useState([]);
   const [data, setData] = useState(null);
-  const [err, setErr] = useState('');
+  const [error, setError] = useState('');
+  const [loading, setLoading] = useState(true);
+
+  const load = async () => {
+    setLoading(true);
+    setError('');
+    try {
+      const live = await readLiveData();
+      setData(live);
+    } catch (e) {
+      console.warn(e);
+      setError(e?.message || '读取飞书数据失败');
+      setData(DEMO);
+    } finally {
+      setLoading(false);
+    }
+  };
 
   useEffect(() => {
-    (async()=>{
-      const s = await bitable.dashboard.getState().catch(()=> 'View');
-      setState(s);
-      const c = await safeGetConfig();
-      setCfg(c);
-      setTables(await loadTables());
-    })();
+    load();
+    let off;
+    try {
+      if (bitable?.base?.onDataChange) {
+        off = bitable.base.onDataChange(load);
+      }
+    } catch (_) {}
+    return () => {
+      if (typeof off === 'function') off();
+    };
   }, []);
 
-  useEffect(()=>{ loadViews(cfg.tableId).then(setViews).catch(()=>setViews([])); }, [cfg.tableId]);
-  useEffect(()=>{ loadFields(cfg.tableId, cfg.viewId).then(setFields).catch(()=>setFields([])); }, [cfg.tableId, cfg.viewId]);
+  const stageRanges = useMemo(() => {
+    const total = data?.totalWorkdays || 0;
+    const a = data?.stage1End || 0;
+    const b = data?.stage2End || 0;
+    return [
+      { code: 1, title: '阶段①', range: total ? `1-${a}` : '--' },
+      { code: 2, title: '阶段②', range: total ? `${a + 1}-${b}` : '--' },
+      { code: 3, title: '阶段③', range: total ? `${b + 1}-${total}` : '--' },
+    ];
+  }, [data]);
 
-  useEffect(()=>{
-    if (!cfg.tableId || !cfg.todayField || !cfg.totalWorkdayField || !cfg.currentWorkdayField || !cfg.progressField) return;
-    readTodayRow(cfg).then(setData).catch(e=>setErr(String(e?.message || e)));
-    const off = bitable.base.onDataChange?.(()=> readTodayRow(cfg).then(setData).catch(()=>{}));
-    return () => off?.();
-  }, [cfg]);
+  if (loading && !data) return <div className="center">正在读取阶段数据...</div>;
 
-  async function confirm() { await saveConfig(cfg); setState('View'); readTodayRow(cfg).then(setData); }
+  const progress = Math.max(0, Math.min(100, data?.progress || 0));
 
-  if (state === 'Create' || state === 'Config') return <ConfigPanel cfg={cfg} setCfg={setCfg} tables={tables} views={views} fields={fields} onConfirm={confirm}/>;
-  if (!cfg.tableId) return <div className="empty">请先配置阶段进度插件</div>;
-  if (err) return <div className="empty">读取失败：{err}</div>;
-  if (!data) return <div className="empty">未找到“是否当日=是”的记录</div>;
-  return <Card data={data} cfg={cfg} />;
+  return (
+    <main className="card">
+      <section className="hero">
+        <div>
+          <div className="label">当前阶段</div>
+          <div className="stage">{data.stageText}</div>
+        </div>
+        <div className="badge">{data.source}</div>
+      </section>
+
+      <section className="metrics">
+        <div className="metric">
+          <span>当前工作日</span>
+          <strong>{data.currentWorkday || '-'} / {data.totalWorkdays || '-'}</strong>
+        </div>
+        <div className="metric">
+          <span>工作日进度</span>
+          <strong>{progress.toFixed(2)}%</strong>
+        </div>
+      </section>
+
+      <section className="progressBox">
+        <div className="progressTrack">
+          <div className="progressBar" style={{ width: `${progress}%` }} />
+        </div>
+        <div className="marks">
+          <span>0%</span><span>33.33%</span><span>66.67%</span><span>100%</span>
+        </div>
+      </section>
+
+      <section className="ranges">
+        {stageRanges.map(item => (
+          <div key={item.code} className={`range ${data.stageCode === item.code ? 'active' : ''}`}>
+            <span>{item.title}</span>
+            <strong>{item.range}</strong>
+          </div>
+        ))}
+      </section>
+
+      {error && (
+        <section className="notice">
+          本地预览/读取失败：{error}<br />
+          放进飞书仪表盘后会自动读取「是否当日=是」这一行。
+        </section>
+      )}
+    </main>
+  );
 }
 
 createRoot(document.getElementById('root')).render(<App />);
